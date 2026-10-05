@@ -128,7 +128,10 @@ fun ChatScreen(
     peerName: String,
     messages: List<ChatMessage>,
     onSendMessage: (String) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onAttachFileClick: (() -> Unit)? = null,
+    selectedFileMetadata: com.example.cappnan.FileMetadata? = null,
+    onClearSelectedFile: (() -> Unit)? = null
 ) {
     var textState by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -141,7 +144,14 @@ fun ChatScreen(
         topBar = {
             TopAppBar(
                 title = { Text(peerName) },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null) } }
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null) } },
+                actions = {
+                    if (onAttachFileClick != null) {
+                        IconButton(onClick = onAttachFileClick) {
+                            Icon(Icons.Default.Add, contentDescription = "Attach File")
+                        }
+                    }
+                }
             )
         }
     ) { padding ->
@@ -149,6 +159,43 @@ fun ChatScreen(
             LazyColumn(modifier = Modifier.weight(1f).padding(8.dp), state = listState) {
                 items(messages) { msg -> MessageBubble(msg) }
             }
+
+            if (selectedFileMetadata != null) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = selectedFileMetadata.fileName,
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "${selectedFileMetadata.fileSize} B • ${selectedFileMetadata.totalChunks} chunks • Status: Ready",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (onClearSelectedFile != null) {
+                            IconButton(onClick = onClearSelectedFile) {
+                                Icon(Icons.Default.Close, contentDescription = "Remove file attachment")
+                            }
+                        }
+                    }
+                }
+            }
+
             Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 TextField(
                     value = textState, onValueChange = { textState = it },

@@ -56,6 +56,35 @@ class MainActivity : ComponentActivity() {
     private val messageBuffer = mutableMapOf<Int, MutableList<String>>()
     private var packetSequenceNumber = 0
 
+    // FILE TRANSFER STATE (PHASE 2 FOUNDATION)
+    private var selectedFileMetadataState by mutableStateOf<FileMetadata?>(null)
+    private var pendingFileTransferEntityState by mutableStateOf<FileTransferEntity?>(null)
+
+    private val selectFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val metadata = FileMetadataUtils.extractMetadata(this, uri)
+            if (metadata != null) {
+                selectedFileMetadataState = metadata
+                val targetName = currentChatTarget ?: ""
+                val targetId = extractIdFromName(targetName)
+                if (targetId != 0) {
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        val fileTransferManager = FileTransferManager(db.fileTransferDao())
+                        val transfer = fileTransferManager.createOutboundTransfer(
+                            fileName = metadata.fileName,
+                            fileSize = metadata.fileSize,
+                            senderId = myNodeId,
+                            receiverId = targetId,
+                            totalChunks = metadata.totalChunks,
+                            localFilePath = metadata.contentUri
+                        )
+                        pendingFileTransferEntityState = transfer
+                    }
+                }
+            }
+        }
+    }
+
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { if (it.all { p -> p.value }) attachToWifiAware() }
 
@@ -151,7 +180,13 @@ class MainActivity : ComponentActivity() {
                             peerName = targetName,
                             messages = msgs,
                             onSendMessage = { msg -> sendMessage(msg) },
-                            onBack = { navController.popBackStack() }
+                            onBack = { navController.popBackStack() },
+                            onAttachFileClick = { selectFileLauncher.launch(arrayOf("*/*")) },
+                            selectedFileMetadata = selectedFileMetadataState,
+                            onClearSelectedFile = {
+                                selectedFileMetadataState = null
+                                pendingFileTransferEntityState = null
+                            }
                         )
                     }
                 }
@@ -252,6 +287,69 @@ class MainActivity : ComponentActivity() {
                     forwardPacketToNextHop(packet)
                 }
             }
+            TYPE_FILE_META -> {
+                if (packet.destId == myNodeId) {
+                    val metaPacket = FilePacketManager.deserializeFileMeta(packet.payload)
+                    if (metaPacket != null) {
+                        val downloadsDir = getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: cacheDir
+                        FileReceiverStore.registerInboundTransfer(
+                            transferId = metaPacket.transferId,
+                            fileName = metaPacket.fileName,
+                            fileSize = metaPacket.fileSize,
+                            totalChunks = metaPacket.totalChunks,
+                            destDir = downloadsDir
+                        )
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            val fileTransferManager = FileTransferManager(db.fileTransferDao())
+                            fileTransferManager.createInboundTransfer(
+                                transferId = metaPacket.transferId,
+                                fileName = metaPacket.fileName,
+                                fileSize = metaPacket.fileSize,
+                                senderId = packet.sourceId,
+                                receiverId = myNodeId,
+                                totalChunks = metaPacket.totalChunks,
+                                localFilePath = java.io.File(downloadsDir, "${metaPacket.transferId}_${metaPacket.fileName}").absolutePath
+                            )
+                            fileTransferManager.updateStatus(metaPacket.transferId, "RECEIVING")
+                        }
+                        runOnUiThread {
+                            Toast.makeText(this@MainActivity, "Receiving file: ${metaPacket.fileName}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } else {
+                    forwardPacketToNextHop(packet)
+                }
+            }
+            TYPE_FILE_CHUNK -> {
+                if (packet.destId == myNodeId) {
+                    val chunkPacket = FilePacketManager.deserializeFileChunk(packet.payload)
+                    if (chunkPacket != null) {
+                        val writtenNew = FileReceiverStore.writeChunk(chunkPacket)
+                        if (writtenNew) {
+                            val inboundState = FileReceiverStore.getInboundTransfer(chunkPacket.transferId)
+                            val recCount = inboundState?.receivedChunkIndices?.size ?: 0
+                            val isComplete = FileReceiverStore.isTransferComplete(chunkPacket.transferId)
+
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                val fileTransferManager = FileTransferManager(db.fileTransferDao())
+                                fileTransferManager.updateProgress(
+                                    transferId = chunkPacket.transferId,
+                                    transferredChunks = recCount,
+                                    status = if (isComplete) "RECEIVED" else "RECEIVING"
+                                )
+                            }
+
+                            if (isComplete) {
+                                runOnUiThread {
+                                    Toast.makeText(this@MainActivity, "File received completely!", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    forwardPacketToNextHop(packet)
+                }
+            }
         }
     }
 
@@ -268,7 +366,7 @@ class MainActivity : ComponentActivity() {
     private fun forwardPacketToNextHop(packet: AodvPacket) {
         val nextHop = routingTable[packet.destId] ?: return
         val newHops = (packet.hopCount + 1).toByte()
-        val bytes = PacketManager.createPacket(packet.type, packet.sourceId, packet.destId, packet.packetId, newHops, packet.getPayloadString())
+        val bytes = PacketManager.createPacket(packet.type, packet.sourceId, packet.destId, packet.packetId, newHops, packet.payload)
         try { nextHop.nextHopSession.sendMessage(nextHop.nextHopHandle, 0, bytes) } catch(e:Exception){}
     }
 
@@ -277,12 +375,103 @@ class MainActivity : ComponentActivity() {
         val targetId = extractIdFromName(targetName)
 
         if (targetId != 0) {
-            lifecycleScope.launch(Dispatchers.IO) {
-                db.messageDao().insertMessage(MessageEntity(chatPartnerId = targetId, text = text, isFromMe = true))
+            val selectedMeta = selectedFileMetadataState
+            if (selectedMeta != null) {
+                sendFileTransfer(selectedMeta, targetId)
+                selectedFileMetadataState = null
+                pendingFileTransferEntityState = null
             }
-            sendRoutedMessage(text, targetId)
+
+            if (text.isNotBlank()) {
+                lifecycleScope.launch(Dispatchers.IO) {
+                    db.messageDao().insertMessage(MessageEntity(chatPartnerId = targetId, text = text, isFromMe = true))
+                }
+                sendRoutedMessage(text, targetId)
+            }
         } else {
             Toast.makeText(this, "Invalid Target ID", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun sendFileTransfer(metadata: FileMetadata, targetId: Int) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val route = routingTable[targetId]
+            if (route == null) {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "No route to peer. Searching...", Toast.LENGTH_SHORT).show()
+                }
+                broadcastRREQ(targetId)
+                return@launch
+            }
+
+            val transferId = pendingFileTransferEntityState?.transferId ?: java.util.UUID.randomUUID().toString()
+
+            // 1. Send File Metadata Packet
+            val metaPacket = FileMetaPacket(
+                transferId = transferId,
+                fileName = metadata.fileName,
+                fileSize = metadata.fileSize,
+                totalChunks = metadata.totalChunks,
+                mimeType = metadata.mimeType ?: "*/*"
+            )
+            val metaBytes = FilePacketManager.serializeFileMeta(metaPacket)
+            packetSequenceNumber++
+            val aodvMetaPacket = PacketManager.createPacket(
+                type = TYPE_FILE_META,
+                sourceId = myNodeId,
+                destId = targetId,
+                packetId = packetSequenceNumber,
+                hopCount = 0,
+                payloadBytes = metaBytes
+            )
+            try {
+                route.nextHopSession.sendMessage(route.nextHopHandle, 0, aodvMetaPacket)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send file meta", e)
+                return@launch
+            }
+
+            val fileTransferManager = FileTransferManager(db.fileTransferDao())
+            fileTransferManager.updateStatus(transferId, "SENDING")
+
+            // 2. Read and Send File Chunks Sequentially
+            try {
+                val uri = android.net.Uri.parse(metadata.contentUri)
+                contentResolver.openInputStream(uri)?.use { inputStream ->
+                    val chunks = FileChunker.readChunks(
+                        inputStream = inputStream,
+                        transferId = transferId,
+                        fileSize = metadata.fileSize
+                    )
+
+                    for (chunk in chunks) {
+                        val chunkPacket = FileChunkPacket(
+                            transferId = transferId,
+                            chunkIndex = chunk.chunkIndex,
+                            totalChunks = chunk.totalChunks,
+                            chunkSize = chunk.chunkSize,
+                            payload = chunk.payload
+                        )
+                        val chunkBytes = FilePacketManager.serializeFileChunk(chunkPacket)
+                        packetSequenceNumber++
+                        val aodvChunkPacket = PacketManager.createPacket(
+                            type = TYPE_FILE_CHUNK,
+                            sourceId = myNodeId,
+                            destId = targetId,
+                            packetId = packetSequenceNumber,
+                            hopCount = 0,
+                            payloadBytes = chunkBytes
+                        )
+                        try {
+                            route.nextHopSession.sendMessage(route.nextHopHandle, 0, aodvChunkPacket)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to send chunk ${chunk.chunkIndex}", e)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error reading file input stream", e)
+            }
         }
     }
 

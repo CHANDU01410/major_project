@@ -9,6 +9,11 @@ const val TYPE_RREP = 2.toByte() // "I know where User X is!"
 const val TYPE_DATA = 3.toByte() // "Hello World"
 const val TYPE_ACK  = 4.toByte() // "Message Received"
 
+// FILE TRANSFER PACKET TYPES (FOUNDATION PHASE)
+const val TYPE_FILE_META  = 5.toByte() // "File Metadata"
+const val TYPE_FILE_CHUNK = 6.toByte() // "File Data Chunk"
+const val TYPE_FILE_ACK   = 7.toByte() // "File Chunk ACK"
+
 // A data class to hold the unpacked info
 data class AodvPacket(
     val type: Byte,
@@ -26,7 +31,11 @@ object PacketManager {
 
     // Convert Data -> Bytes (Packing)
     fun createPacket(type: Byte, sourceId: Int, destId: Int, packetId: Int, hopCount: Byte, payload: String): ByteArray {
-        val payloadBytes = payload.toByteArray()
+        return createPacket(type, sourceId, destId, packetId, hopCount, payload.toByteArray())
+    }
+
+    // Convert Data Bytes -> Packet Bytes (Packing overload for binary payloads)
+    fun createPacket(type: Byte, sourceId: Int, destId: Int, packetId: Int, hopCount: Byte, payloadBytes: ByteArray): ByteArray {
         val buffer = ByteBuffer.allocate(HEADER_SIZE + payloadBytes.size)
 
         buffer.put(type)

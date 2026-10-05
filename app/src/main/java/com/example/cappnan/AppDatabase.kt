@@ -2,6 +2,8 @@ package com.example.cappnan
 
 import android.content.Context
 import androidx.room.*
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 // --- 1. TABLES (ENTITIES) ---
@@ -46,14 +48,41 @@ interface MessageDao {
 
 // --- 3. DATABASE SETUP ---
 
-@Database(entities = [FriendEntity::class, MessageEntity::class], version = 1, exportSchema = false)
+@Database(
+    entities = [FriendEntity::class, MessageEntity::class, FileTransferEntity::class],
+    version = 2,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun friendDao(): FriendDao
     abstract fun messageDao(): MessageDao
+    abstract fun fileTransferDao(): FileTransferDao
 
     companion object {
         @Volatile
         private var INSTANCE: AppDatabase? = null
+
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `file_transfers` (
+                        `transferId` TEXT NOT NULL,
+                        `fileName` TEXT NOT NULL,
+                        `fileSize` INTEGER NOT NULL,
+                        `senderId` INTEGER NOT NULL,
+                        `receiverId` INTEGER NOT NULL,
+                        `totalChunks` INTEGER NOT NULL,
+                        `transferredChunks` INTEGER NOT NULL,
+                        `status` TEXT NOT NULL,
+                        `localFilePath` TEXT,
+                        `timestamp` INTEGER NOT NULL,
+                        PRIMARY KEY(`transferId`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
 
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -61,11 +90,12 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "mesh_app_database"
-                ).build()
+                )
+                .addMigrations(MIGRATION_1_2)
+                .build()
                 INSTANCE = instance
                 instance
             }
         }
     }
 }
-
